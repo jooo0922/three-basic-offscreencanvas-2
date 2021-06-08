@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Document</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+      "use strict";
+
+      import { init, state, pickPosition } from "./shared-picking.js";
+
+      // mousemove 이벤트 좌표값을 1. pickPosition에 바로 할당하는 익명함수 또는 2. 워커용 스크립트에 전달한 뒤 mouse 함수에도 전달하여 호출시키는 익명함수 둘 중 하나가 할당되는 변수
+      let sendMouse;
+
+      // 브라우저가 OffscreenCanvas를 지원할 때 호출하는 함수 (웹워커 사용)
+      function startWorker(canvas) {
+        const offscreen = canvas.transferControlToOffscreen();
+        const worker = new Worker("offscreencanvas-worker-picking.js", {
+          type: "module",
+        });
+
+        sendMouse = (x, y) => {
+          worker.postMessage({ type: "mouse", x, y });
+        };
+
+        worker.postMessage({ type: "init", canvas: offscreen }, [offscreen]);
+
+        function sendSize() {
+          worker.postMessage({
+            type: "size",
+            width: canvas.clientWidth,
+            height: canvas.clientHeight,
+          });
+        }
+
+        window.addEventListener("resize", sendSize);
+        sendSize();
+
+        console.log("using OffscreenCanvas");
+      }
+
+      // 브라우저가 OffscreenCanvas를 지원하지 않을 때 호출하는 함수 (웹워커 미사용)
+      function startMainPage(canvas) {
+        init({ canvas });
+
+        // 여기서는 sendMouse 변수에 pickPosition에 mousemove 이벤트 좌표값을 바로 업데이트해주는 익명함수가 할당됨.
+        sendMouse = (x, y) => {
+          pickPosition.x = x;
+          pickPosition.y = y;
+        };
+
+        function sendSize() {
+          state.width = canvas.clientWidth;
+          state.height = canvas.clientHeight;
+        }
+        window.addEventListener("resize", sendSize);
+        sendSize();
+
+        console.log("using regular canvas");
+      }
+
+      // 캔버스 요소를 참조한 뒤, 현재 브라우저의 OffscreenCanvas 지원 여부에 따라 startWorker() 또는 startMainPage() 함수를 호출함.
+      function main() {
+        const canvas = document.querySelector("#canvas");
+
+        if (canvas.transferControlToOffscreen) {
+          startWorker(canvas);
+        } else {
+          startMainPage(canvas);
+        }
+
+        // 2D 캔버스 상에서 포인터 이벤트로부터 받은 X,Y 좌표값을 3D 공간 상의 X,Y 좌표값으로 변환하는 과정
+        function getCanvasRelativePosition(event) {
+          const rect = canvas.getBoundingClientRect();
+          // 브라우저 상에서의 포인터 이벤트 좌표값이 캔버스 픽셀 사이즈 상에서는 얼마만큼 되는건지 비율적으로 구해줌.
+          return {
+            x: ((event.clientX - rect.left) * canvas.width) / rect.width,
+            y: ((event.clientY - rect.top) * canvas.height) / rect.height,
+          };
+        }
+
+        function setPickPosition(event) {
+          const pos = getCanvasRelativePosition(event);
+
+          // getCanvasRelativePosition() 에서 리턴받은 좌표값으로 3D 공간상에서 사용할 좌표값을 구해 pickPosition에 할당함.
+          // 얘는 사실상 전체 rect.width, height에서 각각 rect.left ~ e.clientX 사이의 거리, rect.top ~ e.clientY 사이의 거리값에
+          // 2 또는 -2를 곱한 뒤 -1 또는 1을 더해준 값이라고 보면 됨. 이 값을 3d 공간상에서 물체를 picking할 때의 좌표값으로 사용하겠다는거
+          // pickPosition.x = (pos.x / canvas.width) * 2 - 1;
+          // pickPosition.y = (pos.y / canvas.height) * -2 + 1; // y축을 뒤집어 줌.
+
+          // 위의 if/else 구문에서 startWorker든 startMainPage든 호출했으니 sendMouse에는 어떤 함수든 할당이 되어있는 상태겠지?
+          // 그렇다면 sendMouse를 호출하면서 3D 공간상에서 사용할 좌표값을 넘겨주어서 pickPosition에 간접적으로 할당하는 게 더 나을거같다.
+          sendMouse(
+            (pos.x / canvas.width) * 2 - 1,
+            (pos.y / canvas.height) * -2 + 1
+          );
+        }
+
+        function clearPickPosition() {
+          /**
+           * 마우스가 window 즉, 브라우저창을 벗어나거나 (mouseout, mouseleave)
+           * 모바일에서 손을 떼거나 (touchend) 했을 때
+           * pickPosition의 좌표값을 -100000, -100000 정도로 할당해줘서
+           * 어떤 물체도 picking할 수 없도록 해주는 함수
+           */
+          sendMouse(-100000, -100000);
+        }
+        window.addEventListener("mousemove", setPickPosition);
+        window.addEventListener("mouseout", clearPickPosition);
+        window.addEventListener("mouseleave", clearPickPosition);
+
+        window.addEventListener(
+          "touchstart",
+          (event) => {
+            event.preventDefault(); // 모바일 브라우저에서 기본적으로 호출하는 default touch events들(여기서는 스크롤이벤트)을 방지하기 위함
+            setPickPosition(event.touches[0]); // touchstart 즉, 터치를 시작한 손가락의 터치이벤트를 0번 터치 이벤트로 지정하고, 해당 이벤트를 setPickPosition 호출 시 넘겨 줌.
+          },
+          { passive: false } // preventDefault를 호출하려면 passive를 false로 지정해줘야 함.
+        );
+
+        window.addEventListener("touchmove", (event) => {
+          setPickPosition(event.touches[0]); // touchstart를 발생시킨 손가락의 터치이벤트(0번에 지정된 터치 이벤트)를 그대로 가져와서 해당 손가락이 움직였을 때의 이벤트를 setPickPosition 호출 시 넘겨 줌.
+        });
+
+        window.addEventListener("touchend", clearPickPosition);
+      }
+
+      main();
+    </script>
+  </body>
+</html>
